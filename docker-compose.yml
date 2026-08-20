@@ -1,0 +1,93 @@
+# Local dev for the api repo. This compose file OWNS the shared local backing
+# services (postgres, azurite, service-bus emulator) on an external Docker network,
+# because the sibling `worker` repo needs to see the exact same Postgres database
+# and the exact same queue — not a second copy of its own.
+#
+# One-time setup:  docker network create tools-cabinet-local
+# Then:             docker compose --env-file .env.local up
+#
+# The --env-file flag is NOT optional here: this file uses ${POSTGRES_USER} etc.
+# directly for compose-level interpolation, which only reads --env-file (or a file
+# literally named .env) — the per-service `env_file:` line is a different
+# mechanism (injects vars into that container at runtime) and does not feed
+# ${...} substitution in this YAML. Without --env-file, postgres silently starts
+# with blank user/password/db and everything downstream breaks confusingly.
+#
+# Start this BEFORE `worker`'s compose — worker joins this network and expects
+# these service names (postgres, azurite, servicebus-emulator) to already resolve.
+#
+# NOTE: Azurite has no local Event Grid — nothing auto-publishes to the queue when
+# a blob lands here like it does in real Azure. For local dev the api most likely
+# needs to publish the "job ready" message itself right after issuing the SAS, as a
+# dev-only stand-in for Event Grid (hence azure-servicebus being a dependency of
+# the api too, not just the worker).
+
+networks:
+  tools-cabinet-local:
+    external: true
+
+services:
+  postgres:
+    image: postgres:16
+    networks: [tools-cabinet-local]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      # host-side 5433, not 5432 — leaves room for another local postgres (a
+      # different project) already sitting on the default port
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite
+    networks: [tools-cabinet-local]
+    # --skipApiVersionCheck: the azure-storage-blob SDK version pinned in
+    # api/requirements.txt sends a newer x-ms-version header than this pinned
+    # Azurite image understands; Azurite rejects it outright (InvalidHeaderValue)
+    # without this flag. Real Blob Storage has no such check.
+    command: "azurite --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0 --skipApiVersionCheck"
+    ports:
+      - "10000:10000" # blob
+      - "10001:10001" # queue
+      - "10002:10002" # table
+
+  # Service Bus emulator's own metadata store — not application data.
+  sb-emulator-db:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    networks: [tools-cabinet-local]
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${SB_EMULATOR_SA_PASSWORD}
+
+  servicebus-emulator:
+    image: mcr.microsoft.com/azure-messaging/servicebus-emulator:latest
+    networks: [tools-cabinet-local]
+    environment:
+      ACCEPT_EULA: "Y"
+      SQL_SERVER: sb-emulator-db
+      MSSQL_SA_PASSWORD: ${SB_EMULATOR_SA_PASSWORD}
+    volumes:
+      - ./servicebus-emulator/config.json:/ServiceBus_Emulator/ConfigFiles/Config.json
+    depends_on:
+      - sb-emulator-db
+    ports:
+      - "5672:5672" # AMQP
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    networks: [tools-cabinet-local]
+    env_file: .env.local
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - azurite
+      - servicebus-emulator
+
+volumes:
+  postgres-data:

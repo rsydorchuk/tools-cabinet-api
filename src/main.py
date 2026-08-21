@@ -8,15 +8,11 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .api.routes import auth, health, jobs, uploads
 from .config import get_settings
-from .db.models import Base
 from .db.session import engine
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
     settings = get_settings()
     if settings.azure_storage_connection_string:
         async with BlobServiceClient.from_connection_string(

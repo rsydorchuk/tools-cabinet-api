@@ -82,6 +82,11 @@ services:
       dockerfile: Dockerfile
     networks: [tools-cabinet-local]
     env_file: .env.local
+    # bind-mounted so `alembic revision --autogenerate` run via `docker compose
+    # exec api ...` writes the generated migration back to the host repo
+    # instead of the container's ephemeral filesystem.
+    volumes:
+      - ./alembic:/app/alembic
     ports:
       - "8000:8000"
     depends_on:
